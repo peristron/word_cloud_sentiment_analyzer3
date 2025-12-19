@@ -1,5 +1,6 @@
 #  optimizing for public deployment + large files + graph analysis + the 'ai'
-#  + BAYESIAN DATA ANALYSIS (Beta-Binomial Sentiment Inference)
+#  + BAYESIAN SENTIMENT (Beta-Binomial)
+#  + BAYESIAN TOPIC MODELING (Latent Dirichlet Allocation)
 #
 import io
 import re
@@ -36,11 +37,18 @@ except ImportError:
     requests = None
     BeautifulSoup = None
 
-# --- NEW: Bayesian Math Imports
+# --- NEW: Bayesian / ML Imports
 try:
     from scipy.stats import beta as beta_dist
 except ImportError:
     beta_dist = None
+
+try:
+    from sklearn.decomposition import LatentDirichletAllocation
+    from sklearn.feature_extraction import DictVectorizer
+except ImportError:
+    LatentDirichletAllocation = None
+    DictVectorizer = None
 
 # --- optional imports
 try:
@@ -457,30 +465,73 @@ def calculate_text_stats(counts: Counter, total_rows: int) -> Dict:
     }
 
 # --- NEW: Bayesian Helper Functions
+
+def perform_bayesian_lda(file_counts: List[Counter], n_topics: int = 4, top_n_words: int = 6) -> Optional[List[Dict]]:
+    """
+    Performs Latent Dirichlet Allocation (LDA) Topic Modeling on the processed counts.
+    file_counts: A list where each element is a Counter object representing a document (file/url).
+    """
+    if not LatentDirichletAllocation or not DictVectorizer: return None
+    if len(file_counts) < 1: return None
+    
+    # 1. Vectorize: Convert list of Counters to sparse matrix (Document-Term Matrix)
+    vectorizer = DictVectorizer(sparse=True)
+    # Filter out empty counters to avoid errors
+    valid_counts = [c for c in file_counts if c and len(c) > 0]
+    if not valid_counts: return None
+    
+    dtm = vectorizer.fit_transform(valid_counts)
+    
+    # 2. Bayesian Modeling (LDA)
+    # Use "batch" for small-ish datasets, or "online" if very large.
+    # Given we are already in-memory, batch is fine and often more stable for small N.
+    lda = LatentDirichletAllocation(
+        n_components=n_topics, 
+        random_state=42, 
+        learning_method='batch',
+        max_iter=10
+    )
+    
+    lda.fit(dtm)
+    
+    # 3. Extract Topics
+    feature_names = vectorizer.get_feature_names_out()
+    topics = []
+    
+    for topic_idx, topic in enumerate(lda.components_):
+        # topic is a vector of weights over words. Get indices of top words.
+        top_indices = topic.argsort()[:-top_n_words - 1:-1]
+        top_words = [feature_names[i] for i in top_indices]
+        # Sum of weights for these top words to give a rough "strength"
+        strength = sum(topic[i] for i in top_indices)
+        topics.append({
+            "id": topic_idx + 1,
+            "words": top_words,
+            "strength": strength
+        })
+        
+    return topics
+
 def perform_bayesian_sentiment_analysis(counts: Counter, sentiments: Dict[str, float], pos_thresh: float, neg_thresh: float) -> Optional[Dict]:
     """
     Uses a Beta-Binomial Conjugate Pair to estimate the true probability of Positive vs Negative sentiment.
-    This creates a credible interval (uncertainty quantification) rather than just a raw count.
     """
     if not beta_dist: return None
     
     pos_count = sum(counts[w] for w, s in sentiments.items() if s >= pos_thresh)
     neg_count = sum(counts[w] for w, s in sentiments.items() if s <= neg_thresh)
     
-    # We ignore neutral words for the binary proportion analysis
     total_informative = pos_count + neg_count
     if total_informative < 1: return None
 
-    # Prior: Beta(1,1) represents a Uniform distribution (we know nothing initially)
+    # Prior: Beta(1,1) is Uniform
     # Posterior: Beta(1+successes, 1+failures)
     alpha_post = 1 + pos_count
     beta_post = 1 + neg_count
     
-    # Calculate Mean and 95% Credible Interval (High Density Interval)
     mean_prob = alpha_post / (alpha_post + beta_post)
     lower_ci, upper_ci = beta_dist.ppf([0.025, 0.975], alpha_post, beta_post)
     
-    # Generate distribution for plotting
     x = np.linspace(0, 1, 300)
     y = beta_dist.pdf(x, alpha_post, beta_post)
     
@@ -593,8 +644,8 @@ with st.expander("📘 App Guide (Bayesian & AI Features)", expanded=False):
     This app combines **Network Graph Theory**, **Bayesian Statistics**, and **Generative AI** to reveal context.
 
     1.  **Network Graph:** Maps relationships. Algorithms detect "Communities" (automatic topic modeling).
-    2.  **Bayesian Inference (NEW):** When Sentiment Analysis is enabled, we use a **Beta-Binomial** model. Instead of just saying "60% Positive", we calculate a **95% Credible Interval** (e.g., "We are 95% confident the true positive rate is between 55% and 65%"). This is crucial for noisy, unstructured data.
-    3.  **The AI Analyst:** Synthesizes patterns into a human-readable narrative.
+    2.  **Bayesian Theme Discovery (NEW):** Uses **Latent Dirichlet Allocation (LDA)**. This is a generative probabilistic model that assumes your files are mixtures of hidden topics. It reverses the process to find those topics.
+    3.  **Bayesian Sentiment (NEW):** When Sentiment Analysis is enabled, we use a **Beta-Binomial** model to calculate a **95% Credible Interval** for sentiment confidence.
     """)
 
 st.warning("""
@@ -729,6 +780,8 @@ with st.sidebar:
         encoding_choice = st.selectbox("file encoding", ["auto (utf-8)", "latin-1"])
         chunksize = st.number_input("csv chunk size", 1_000, 100_000, 10_000, 1_000)
         compute_bigrams = st.checkbox("compute bigrams / graph", value=True)
+        # New Setting for LDA
+        n_lda_topics = st.slider("LDA: Number of Topics", 2, 10, 4, help="How many hidden themes to search for.")
 
 # -----------------------------
 # main processing loop
@@ -876,7 +929,8 @@ if all_inputs:
             add_preps, drop_integers, min_word_len, compute_bigrams, make_progress_cb(approx_rows), update_every
         )
         
-        file_results.append({"rows": data["rows"]})
+        # NOTE: We now save the 'counts' per file to enable LDA later
+        file_results.append({"rows": data["rows"], "counts": data["counts"]})
 
         per_file_bar.progress(100)
         per_file_status.markdown(f"✅ done in {format_duration(time.perf_counter() - start_wall)} • rows: {data['rows']:,}")
@@ -907,6 +961,48 @@ if enable_sentiment and combined_counts:
         term_sentiments.update(get_sentiments(analyzer, bigram_phrases))
 
 st.divider()
+
+# --- NEW: BAYESIAN THEME DISCOVERY (Before Sentiment)
+if combined_counts and LatentDirichletAllocation:
+    st.subheader("🔍 Bayesian Theme Discovery")
+    with st.expander("🤔 How this works (Latent Dirichlet Allocation)", expanded=False):
+        st.markdown("""
+        **Latent Dirichlet Allocation (LDA)** is a Bayesian probabilistic model. 
+        
+        Instead of just counting words, it assumes that:
+        1.  There are **hidden topics** pervading your files.
+        2.  Every file is a unique mixture of these topics.
+        3.  Every topic is a mixture of specific words.
+        
+        The model "reverses" the process to discover what these hidden topics likely are based on word co-occurrences across your different files.
+        """)
+    
+    # We need a list of counters, one per file.
+    list_of_counts = [res['counts'] for res in file_results if res.get('counts')]
+    
+    if len(list_of_counts) > 0:
+        with st.spinner("Running LDA Topic Modeling..."):
+            lda_topics = perform_bayesian_lda(list_of_counts, n_topics=n_lda_topics)
+        
+        if lda_topics:
+            cols = st.columns(len(lda_topics))
+            for idx, topic in enumerate(lda_topics):
+                with cols[idx]:
+                    st.markdown(f"**Topic {topic['id']}**")
+                    # Display words as simple tags
+                    for w in topic['words']:
+                        st.markdown(f"`{w}`")
+        else:
+            st.warning("Not enough distinct data across files to detect topics.")
+    else:
+        st.info("Upload multiple files/URLs to enable Topic Modeling.")
+    st.divider()
+
+elif combined_counts and not LatentDirichletAllocation:
+    st.warning("⚠️ `scikit-learn` not installed. Topic Modeling disabled.")
+    st.divider()
+
+
 st.subheader("🖼️ Combined Word Cloud")
 if combined_counts:
     try:
@@ -930,21 +1026,10 @@ if combined_counts:
 
     show_graph = compute_bigrams and combined_bigrams and st.checkbox("🕸️ Show Network Graph & Advanced Analytics", value=True)
     
-    # --- NEW: Bayesian Inference Section (Conditional on Sentiment)
+    # --- Bayesian Sentiment Inference (Moved after Themes, as requested)
     if enable_sentiment and beta_dist:
         st.subheader("⚖️ Bayesian Sentiment Inference")
         
-        with st.expander("What's this?", expanded=False):
-            st.markdown("""
-            **Bayesian Inference** updates our beliefs based on data.
-            Instead of just saying "60% of words are positive," this model calculates a **Credible Interval**.
-            It answers: *"Given the amount of text we've seen, how confident are we in the true underlying sentiment rate?"*
-            
-            *   **Blue Line:** The probability curve. The peak is the most likely True Positive Rate.
-            *   **Green Area:** The 95% High Density Interval. We are 95% sure the true value is in here.
-            *   **Why does this matter?** If you have very little text, the curve will be flat (uncertain). If you have lots of text, it will be sharp (certain).
-            """)
-
         bayes_result = perform_bayesian_sentiment_analysis(combined_counts, term_sentiments, pos_threshold, neg_threshold)
         
         if bayes_result:
