@@ -1,6 +1,6 @@
 #  optimizing for public deployment + large files + graph analysis + the 'ai'
 #  + BAYESIAN SENTIMENT (Beta-Binomial)
-#  + BAYESIAN TOPIC MODELING (Latent Dirichlet Allocation)
+#  + BAYESIAN TOPIC MODELING (LDA & NMF Options)
 #
 import io
 import re
@@ -44,10 +44,11 @@ except ImportError:
     beta_dist = None
 
 try:
-    from sklearn.decomposition import LatentDirichletAllocation
+    from sklearn.decomposition import LatentDirichletAllocation, NMF
     from sklearn.feature_extraction import DictVectorizer
 except ImportError:
     LatentDirichletAllocation = None
+    NMF = None
     DictVectorizer = None
 
 # --- optional imports
@@ -464,45 +465,54 @@ def calculate_text_stats(counts: Counter, total_rows: int) -> Dict:
         "Lexical Diversity": round(unique_tokens / total_tokens, 4) if total_tokens else 0
     }
 
-# --- NEW: Bayesian Helper Functions
+# --- NEW: Bayesian / ML Helper Functions
 
-def perform_bayesian_lda(file_counts: List[Counter], n_topics: int = 4, top_n_words: int = 6) -> Optional[List[Dict]]:
+def perform_topic_modeling(file_counts: List[Counter], n_topics: int = 4, top_n_words: int = 6, model_type: str = "LDA") -> Optional[List[Dict]]:
     """
-    Performs Latent Dirichlet Allocation (LDA) Topic Modeling on the processed counts.
-    file_counts: A list where each element is a Counter object representing a document (file/url).
+    Performs Topic Modeling (LDA or NMF) on the processed counts.
+    file_counts: A list where each element is a Counter object representing a document.
     """
-    if not LatentDirichletAllocation or not DictVectorizer: return None
+    if not DictVectorizer: return None
+    # Check if correct library is available based on selection
+    if model_type == "LDA" and not LatentDirichletAllocation: return None
+    if model_type == "NMF" and not NMF: return None
+
     if len(file_counts) < 1: return None
     
-    # 1. Vectorize: Convert list of Counters to sparse matrix (Document-Term Matrix)
+    # 1. Vectorize
     vectorizer = DictVectorizer(sparse=True)
-    # Filter out empty counters to avoid errors
     valid_counts = [c for c in file_counts if c and len(c) > 0]
     if not valid_counts: return None
     
     dtm = vectorizer.fit_transform(valid_counts)
     
-    # 2. Bayesian Modeling (LDA)
-    # Use "batch" for small-ish datasets, or "online" if very large.
-    # Given we are already in-memory, batch is fine and often more stable for small N.
-    lda = LatentDirichletAllocation(
-        n_components=n_topics, 
-        random_state=42, 
-        learning_method='batch',
-        max_iter=10
-    )
+    # 2. Initialize Model
+    model = None
+    if model_type == "LDA":
+        model = LatentDirichletAllocation(
+            n_components=n_topics, 
+            random_state=42, 
+            learning_method='batch',
+            max_iter=10
+        )
+    elif model_type == "NMF":
+        model = NMF(
+            n_components=n_topics,
+            random_state=42,
+            init='nndsvd'
+        )
     
-    lda.fit(dtm)
+    if not model: return None
+
+    model.fit(dtm)
     
     # 3. Extract Topics
     feature_names = vectorizer.get_feature_names_out()
     topics = []
     
-    for topic_idx, topic in enumerate(lda.components_):
-        # topic is a vector of weights over words. Get indices of top words.
+    for topic_idx, topic in enumerate(model.components_):
         top_indices = topic.argsort()[:-top_n_words - 1:-1]
         top_words = [feature_names[i] for i in top_indices]
-        # Sum of weights for these top words to give a rough "strength"
         strength = sum(topic[i] for i in top_indices)
         topics.append({
             "id": topic_idx + 1,
@@ -524,8 +534,6 @@ def perform_bayesian_sentiment_analysis(counts: Counter, sentiments: Dict[str, f
     total_informative = pos_count + neg_count
     if total_informative < 1: return None
 
-    # Prior: Beta(1,1) is Uniform
-    # Posterior: Beta(1+successes, 1+failures)
     alpha_post = 1 + pos_count
     beta_post = 1 + neg_count
     
@@ -643,9 +651,9 @@ with st.expander("📘 App Guide (Bayesian & AI Features)", expanded=False):
     **The Unstructured Data Intel Engine**  
     This app combines **Network Graph Theory**, **Bayesian Statistics**, and **Generative AI** to reveal context.
 
-    1.  **Network Graph:** Maps relationships. Algorithms detect "Communities" (automatic topic modeling).
-    2.  **Bayesian Theme Discovery (NEW):** Uses **Latent Dirichlet Allocation (LDA)**. This is a generative probabilistic model that assumes your files are mixtures of hidden topics. It reverses the process to (try to) find those topics.
-    3.  **Bayesian Sentiment (NEW):** When Sentiment Analysis is enabled, we use a **Beta-Binomial** model to calculate a **95% Credible Interval** for sentiment confidence.
+    1.  **Network Graph:** Maps relationships and detects "Communities".
+    2.  **Bayesian Theme Discovery:** Allows you to choose between **LDA** (Probabilistic) and **NMF** (Linear Algebra) to find hidden topics in your files.
+    3.  **Bayesian Sentiment:** Uses a **Beta-Binomial** model to calculate a **95% Credible Interval** for sentiment confidence.
     """)
 
 st.warning("""
@@ -720,8 +728,8 @@ with st.sidebar:
     
     # --- NEW: URL & Manual Input ---
     st.markdown("### 🌐 Web & Files")
-    url_input = st.text_area("enter urls (1 per line)", height=100, help="The app will scrape the visible text from these pages")
-    manual_input = st.text_area("paste text manually", height=150, help="Copy text from non-public sites and paste here")
+    url_input = st.text_area("enter urls (one per line)", height=100, help="The app will scrape the visible text from these pages.")
+    manual_input = st.text_area("paste text manually", height=150, help="Copy text from non-public sites and paste here.")
     
     st.info("Performance Tip: Streaming allows files up to ~1GB")
     uploaded_files = st.file_uploader(
@@ -780,8 +788,10 @@ with st.sidebar:
         encoding_choice = st.selectbox("file encoding", ["auto (utf-8)", "latin-1"])
         chunksize = st.number_input("csv chunk size", 1_000, 100_000, 10_000, 1_000)
         compute_bigrams = st.checkbox("compute bigrams / graph", value=True)
-        # New Setting for LDA
-        n_lda_topics = st.slider("LDA: Number of Topics", 2, 10, 4, help="How many hidden themes to search for.")
+        # New Settings for Topic Modeling
+        st.markdown("**Topic Modeling (LDA/NMF)**")
+        topic_model_type = st.selectbox("Model Type", ["LDA (Probabilistic)", "NMF (Distinct)"], index=0, help="LDA is better for long text/essays. NMF is better for short logs/chats.")
+        n_topics_val = st.slider("Number of Topics", 2, 10, 4, help="How many hidden themes to search for.")
 
 # -----------------------------
 # main processing loop
@@ -929,7 +939,7 @@ if all_inputs:
             add_preps, drop_integers, min_word_len, compute_bigrams, make_progress_cb(approx_rows), update_every
         )
         
-        # NOTE: We now save the 'counts' per file to enable LDA later
+        # Save counts for LDA/NMF
         file_results.append({"rows": data["rows"], "counts": data["counts"]})
 
         per_file_bar.progress(100)
@@ -963,33 +973,37 @@ if enable_sentiment and combined_counts:
 st.divider()
 
 # --- NEW: BAYESIAN THEME DISCOVERY (Before Sentiment)
-if combined_counts and LatentDirichletAllocation:
+if combined_counts and DictVectorizer:
     st.subheader("🔍 Bayesian Theme Discovery")
-    with st.expander("🤔 How this works (Latent Dirichlet Allocation)", expanded=False):
-        st.markdown("""
-        **Latent Dirichlet Allocation (LDA)** is a Bayesian probabilistic model. 
-        
-        Instead of just counting words, it assumes that:
-        1.  There are **hidden topics** pervading your files.
-        2.  Every file is a unique mixture of these topics.
-        3.  Every topic is a mixture of specific words.
-        
-        The model "reverses" the process to discover what these hidden topics likely are based on word co-occurrences across your different files.
-        """)
     
-    # We need a list of counters, one per file.
+    # Extract model type from sidebar selection string
+    selected_model_type = "LDA" if "LDA" in topic_model_type else "NMF"
+    
+    with st.expander(f"🤔 How this works ({selected_model_type})", expanded=False):
+        if selected_model_type == "LDA":
+            st.markdown("""
+            **Latent Dirichlet Allocation (LDA)** is probabilistic. 
+            *   **Best for:** Essays, assignments, and long mixed content.
+            *   **Logic:** Assumes documents are "smoothies" (mixtures) of various ingredients (topics). It finds the recipes.
+            """)
+        else:
+            st.markdown("""
+            **Non-negative Matrix Factorization (NMF)** is linear algebra.
+            *   **Best for:** Short feedback, chat logs, and distinct issues.
+            *   **Logic:** Assumes documents are distinct items. It tries to sort words into clear, sharp buckets (topics).
+            """)
+    
     list_of_counts = [res['counts'] for res in file_results if res.get('counts')]
     
     if len(list_of_counts) > 0:
-        with st.spinner("Running LDA Topic Modeling..."):
-            lda_topics = perform_bayesian_lda(list_of_counts, n_topics=n_lda_topics)
+        with st.spinner(f"Running {selected_model_type} Topic Modeling..."):
+            topics = perform_topic_modeling(list_of_counts, n_topics=n_topics_val, model_type=selected_model_type)
         
-        if lda_topics:
-            cols = st.columns(len(lda_topics))
-            for idx, topic in enumerate(lda_topics):
+        if topics:
+            cols = st.columns(len(topics))
+            for idx, topic in enumerate(topics):
                 with cols[idx]:
                     st.markdown(f"**Topic {topic['id']}**")
-                    # Display words as simple tags
                     for w in topic['words']:
                         st.markdown(f"`{w}`")
         else:
@@ -998,7 +1012,7 @@ if combined_counts and LatentDirichletAllocation:
         st.info("Upload multiple files/URLs to enable Topic Modeling.")
     st.divider()
 
-elif combined_counts and not LatentDirichletAllocation:
+elif combined_counts and not DictVectorizer:
     st.warning("⚠️ `scikit-learn` not installed. Topic Modeling disabled.")
     st.divider()
 
@@ -1026,7 +1040,7 @@ if combined_counts:
 
     show_graph = compute_bigrams and combined_bigrams and st.checkbox("🕸️ Show Network Graph & Advanced Analytics", value=True)
     
-    # --- Bayesian Sentiment Inference (Moved after Themes, as requested)
+    # --- Bayesian Sentiment Inference (Moved after Themes)
     if enable_sentiment and beta_dist:
         st.subheader("⚖️ Bayesian Sentiment Inference")
         
@@ -1041,7 +1055,6 @@ if combined_counts:
                 st.success(f"95% Credible Interval:\n**{bayes_result['ci_low']:.1%} — {bayes_result['ci_high']:.1%}**")
             
             with b_col2:
-                # Plotting the Beta Distribution
                 fig_bayes, ax_bayes = plt.subplots(figsize=(8, 4))
                 ax_bayes.plot(bayes_result['x_axis'], bayes_result['pdf_y'], lw=2, color='blue', label='Posterior PDF')
                 ax_bayes.fill_between(bayes_result['x_axis'], 0, bayes_result['pdf_y'], 
