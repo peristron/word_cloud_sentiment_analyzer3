@@ -644,7 +644,7 @@ with st.expander("📘 App Guide (Bayesian & AI Features)", expanded=False):
     This app combines **Network Graph Theory**, **Bayesian Statistics**, and **Generative AI** to reveal context.
 
     1.  **Network Graph:** Maps relationships. Algorithms detect "Communities" (automatic topic modeling).
-    2.  **Bayesian Theme Discovery (NEW):** Uses **Latent Dirichlet Allocation (LDA)**. This is a generative probabilistic model that assumes your files are mixtures of hidden topics. It reverses the process to find those topics.
+    2.  **Bayesian Theme Discovery (NEW):** Uses **Latent Dirichlet Allocation (LDA)**. This is a generative probabilistic model that assumes your files are mixtures of hidden topics. It reverses the process to (try to) find those topics.
     3.  **Bayesian Sentiment (NEW):** When Sentiment Analysis is enabled, we use a **Beta-Binomial** model to calculate a **95% Credible Interval** for sentiment confidence.
     """)
 
