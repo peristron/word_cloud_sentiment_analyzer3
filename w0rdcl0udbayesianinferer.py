@@ -934,7 +934,7 @@ if combined_counts:
     if enable_sentiment and beta_dist:
         st.subheader("⚖️ Bayesian Sentiment Inference")
         
-        with st.expander("🤔 What is this?", expanded=False):
+        with st.expander("What's this?", expanded=False):
             st.markdown("""
             **Bayesian Inference** updates our beliefs based on data.
             Instead of just saying "60% of words are positive," this model calculates a **Credible Interval**.
