@@ -720,8 +720,8 @@ with st.sidebar:
     
     # --- NEW: URL & Manual Input ---
     st.markdown("### 🌐 Web & Files")
-    url_input = st.text_area("enter urls (one per line)", height=100, help="The app will scrape the visible text from these pages.")
-    manual_input = st.text_area("paste text manually", height=150, help="Copy text from non-public sites and paste here.")
+    url_input = st.text_area("enter urls (1 per line)", height=100, help="The app will scrape the visible text from these pages")
+    manual_input = st.text_area("paste text manually", height=150, help="Copy text from non-public sites and paste here")
     
     st.info("Performance Tip: Streaming allows files up to ~1GB")
     uploaded_files = st.file_uploader(
